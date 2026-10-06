@@ -55,7 +55,7 @@ class TestPlan:
         worker = dev.plan(_args(), tmp_path, watching=True)[1]
         assert "watchfiles" in worker.command
         assert str(tmp_path / "docsgpt") in worker.command, "it watches the package, not the whole checkout"
-        assert "docsgpt worker" in " ".join(worker.command)
+        assert "worker -l INFO" in " ".join(worker.command)
 
     def test_without_watchfiles_the_worker_still_runs(self, tmp_path):
         worker = dev.plan(_args(), tmp_path, watching=False)[1]
@@ -98,12 +98,22 @@ class TestPlan:
 
     def test_the_ui_runs_in_the_frontend_directory(self, tmp_path, monkeypatch):
         (tmp_path / "frontend" / "node_modules").mkdir(parents=True)
+        monkeypatch.setattr(dev.sys, "platform", "linux")
         monkeypatch.setattr(dev.shutil, "which", lambda name: "/usr/local/bin/npm")
         children = dev.plan(_args(ui=True), tmp_path, watching=False)
         ui = children[-1]
         assert ui.name == "ui"
         assert ui.command == ["npm", "run", "dev"]
         assert ui.cwd == tmp_path / "frontend"
+
+    def test_the_ui_uses_npm_cmd_on_windows(self, tmp_path, monkeypatch):
+        (tmp_path / "frontend" / "node_modules").mkdir(parents=True)
+        monkeypatch.setattr(dev.sys, "platform", "win32")
+        monkeypatch.setattr(dev.shutil, "which", lambda name: "C:/node/npm.cmd" if name == "npm.cmd" else None)
+
+        ui = dev.plan(_args(ui=True), tmp_path, watching=False)[-1]
+
+        assert ui.command == ["npm.cmd", "run", "dev"]
 
 
 class TestRun:
@@ -166,7 +176,7 @@ class TestRun:
                        sleep=sleep, colour=False, grace=5)
         assert code == 0
         assert signal.SIGINT in sent
-        assert signal.SIGKILL in sent, "the second interrupt escalates instead of escaping"
+        assert (signal.SIGTERM if sys.platform == "win32" else signal.SIGKILL) in sent
 
     def test_children_get_the_checkout_environment(self, tmp_path, monkeypatch):
         seen = {}
@@ -185,7 +195,19 @@ class TestRun:
 
 
 class TestReloadingCommand:
-    def test_an_interpreter_path_with_spaces_survives(self):
+    def test_windows_worker_uses_a_function_target(self, monkeypatch):
+        monkeypatch.setattr(dev.sys, "platform", "win32")
+        command = dev._reloading_command(
+            ["C:/Program Files/Python/python.exe", "-m", "docsgpt", "worker", "-l", "INFO"],
+            Path("C:/checkout/docsgpt"),
+        )
+
+        assert command[command.index("--target-type") + 1] == "function"
+        assert command[command.index("--args") + 1] == "worker -l INFO"
+        assert "docsgpt.deploy.dev._watched_worker" in command
+
+    def test_an_interpreter_path_with_spaces_survives(self, monkeypatch):
+        monkeypatch.setattr(dev.sys, "platform", "linux")
         command = dev._reloading_command(["/opt/my venv/bin/python", "-m", "docsgpt", "worker"], Path("/srv/pkg"))
         assert "'/opt/my venv/bin/python' -m docsgpt worker" in command
-        assert command[-1] == "/srv/pkg"
+        assert command[-1] == str(Path("/srv/pkg"))

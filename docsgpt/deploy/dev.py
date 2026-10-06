@@ -53,7 +53,22 @@ def watchfiles_available() -> bool:
 
 def _reloading_command(command: list[str], watched: Path) -> list[str]:
     """``command`` under watchfiles, restarted when a Python file under ``watched`` changes."""
+    if sys.platform == "win32":
+        # watchfiles splits command targets with shlex(posix=False), which keeps
+        # quotes around a Python path in Program Files and cannot launch it.
+        return [
+            sys.executable, "-m", "watchfiles", "--filter", "python",
+            "--target-type", "function", "--args", shlex.join(command[3:]),
+            "docsgpt.deploy.dev._watched_worker", str(watched),
+        ]
     return [sys.executable, "-m", "watchfiles", "--filter", "python", shlex.join(command), str(watched)]
+
+
+def _watched_worker() -> None:
+    """Run the CLI worker using arguments supplied by watchfiles on Windows."""
+    from docsgpt.cli import main
+
+    raise SystemExit(main())
 
 
 def plan(
@@ -108,9 +123,10 @@ def plan(
                 f"the frontend has no node_modules yet. Run `npm install --include=dev` in {frontend} "
                 "and try again, or leave --ui off."
             )
-        if not shutil.which("npm"):
+        npm = "npm.cmd" if sys.platform == "win32" else "npm"
+        if not shutil.which(npm):
             raise DeployError("npm is not on PATH, so the frontend dev server cannot start.")
-        children.append(Child(name="ui", command=["npm", "run", "dev"], cwd=frontend, env=dict(environment)))
+        children.append(Child(name="ui", command=[npm, "run", "dev"], cwd=frontend, env=dict(environment)))
 
     return children
 
@@ -165,7 +181,7 @@ def _stop(running: list[tuple[Child, object]], grace: float, sleep: Callable[[fl
             break
     for _, process in running:
         if process.poll() is None:
-            _signal(process, signal.SIGKILL)
+            _signal(process, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
 
 
 def run(
